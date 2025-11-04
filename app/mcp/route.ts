@@ -63,8 +63,7 @@ const handler = createMcpHandler(
           .regex(/^\d+$/, "term must be numeric, e.g., '3530'")
           .describe("UML term code, e.g., '3530' for 2026 Spring"),
         classNumber: z
-          .union([z.string(), z.number()])
-          .transform((v) => String(v))
+          .coerce.string()
           .regex(/^\d+$/, "classNumber must be numeric, e.g., '9670'")
           .describe("UML class number, e.g., '9670'"),
       },
