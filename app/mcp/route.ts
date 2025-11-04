@@ -1,122 +1,117 @@
 import { createMcpHandler } from "@vercel/mcp-adapter";
 import { z } from "zod";
 
-// Employee leave records
-const employeeLeaves: Record<string, { balance: number; history: string[] }> = {
-  E001: { balance: 18, history: ["2024-12-25", "2025-01-01"] },
-  E002: { balance: 20, history: [] },
-};
+// --- Types ---
+interface UmlApiResponse {
+  isError: boolean;
+  message: string | null;
+  statusCode: number;
+  data?: {
+    Classes?: any[];
+  } | null;
+}
 
+// --- Utilities ---
+const BASE_URL =
+  "https://www.uml.edu/student-dashboard/api/ClassSchedule/RealTime/Search";
+
+async function fetchCourseDetails(term: string, classNumber: string) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+
+  try {
+    const params = new URLSearchParams({ term, classNumber });
+    const url = `${BASE_URL}?${params.toString()}`;
+
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { "accept": "application/json" },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    }
+
+    const json = (await res.json()) as UmlApiResponse;
+
+    if (json.isError) {
+      throw new Error(json.message || "UML API responded with an error");
+    }
+
+    const cls = json?.data?.Classes?.[0];
+    if (!cls) {
+      return null;
+    }
+    return cls;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// --- MCP Handler ---
 const handler = createMcpHandler(
   (server) => {
-    // Tool: Get Leave Balance
+    // Tool: Get Course Details for a given term & class number
     server.tool(
-      "get_leave_balance",
-      "Check how many leave days are left for the employee",
-      { employee_id: z.string() },
-      async ({ employee_id }) => {
-        const data = employeeLeaves[employee_id];
-        if (data) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `${employee_id} has ${data.balance} leave days remaining.`,
-              },
-            ],
-          };
-        }
-        return {
-          content: [{ type: "text", text: "Employee ID not found." }],
-        };
-      }
-    );
-
-    // Tool: Apply for Leave
-    server.tool(
-      "apply_leave",
-      "Apply leave for specific dates (e.g., ['2025-04-17'])",
+      "get_course_details",
+      "Fetch detailed class information from UML for the given term and class number.",
       {
-        employee_id: z.string(),
-        leave_dates: z.array(z.string()),
+        term: z
+          .string()
+          .regex(/^\d+$/, "term must be numeric, e.g., '3530'")
+          .describe("UML term code, e.g., '3530' for 2026 Spring"),
+        classNumber: z
+          .union([z.string(), z.number()])
+          .transform((v) => String(v))
+          .regex(/^\d+$/, "classNumber must be numeric, e.g., '9670'")
+          .describe("UML class number, e.g., '9670'"),
       },
-      async ({ employee_id, leave_dates }) => {
-        const data = employeeLeaves[employee_id];
-        if (!data) {
-          return {
-            content: [{ type: "text", text: "Employee ID not found." }],
-          };
-        }
+      async ({ term, classNumber }) => {
+        try {
+          const cls = await fetchCourseDetails(term, classNumber);
 
-        const requestedDays = leave_dates.length;
-        const available = data.balance;
+          if (!cls) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `No class found for term=${term} and classNumber=${classNumber}.`,
+                },
+              ],
+            };
+          }
 
-        if (available < requestedDays) {
+          // Prefer JSON content (if the client supports it); also include a text echo for resilience
           return {
             content: [
-              {
-                type: "text",
-                text: `Insufficient leave balance. You requested ${requestedDays} day(s) but have only ${available}.`,
-              },
+              // @ts-ignore – some MCP clients support a structured JSON part
+              { type: "json", json: cls },
+              { type: "text", text: JSON.stringify(cls) },
             ],
           };
-        }
+        } catch (err: any) {
+          const message = err?.name === "AbortError"
+            ? "Request timed out while contacting the UML API"
+            : err?.message || "Unexpected error";
 
-        // Deduct balance and record history
-        data.balance -= requestedDays;
-        data.history.push(...leave_dates);
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Leave applied for ${requestedDays} day(s). Remaining balance: ${data.balance}.`,
-            },
-          ],
-        };
-      }
-    );
-
-    // Tool: Get Leave History
-    server.tool(
-      "get_leave_history",
-      "Get leave history for the employee",
-      { employee_id: z.string() },
-      async ({ employee_id }) => {
-        const data = employeeLeaves[employee_id];
-        if (!data) {
           return {
-            content: [{ type: "text", text: "Employee ID not found." }],
-          };
+            content: [
+              { type: "text", text: `Error: ${message}` },
+            ],
+            isError: true,
+          } as any;
         }
-
-        const history =
-          data.history.length > 0
-            ? data.history.join(", ")
-            : "No leaves taken.";
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Leave history for ${employee_id}: ${history}`,
-            },
-          ],
-        };
       }
     );
   },
   {
     capabilities: {
       tools: {
-        get_leave_balance: {
-          description: "Check how many leave days are left for the employee",
-        },
-        apply_leave: {
-          description: "Apply leave for specific dates (e.g., ['2025-04-17'])",
-        },
-        get_leave_history: {
-          description: "Get leave history for the employee",
+        get_course_details: {
+          description:
+            "Fetch detailed class information from UML for the given term and class number.",
         },
       },
     },
