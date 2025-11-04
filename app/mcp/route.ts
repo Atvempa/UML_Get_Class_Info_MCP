@@ -85,8 +85,6 @@ const handler = createMcpHandler(
           // Prefer JSON content (if the client supports it); also include a text echo for resilience
           return {
             content: [
-              // @ts-ignore – some MCP clients support a structured JSON part
-              { type: "json", json: cls },
               { type: "text", text: JSON.stringify(cls) },
             ],
           };
