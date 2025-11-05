@@ -137,7 +137,7 @@ const handler = createMcpHandler(
 
           // ---- Enforce max 20 classes in the returned payload ----
           const classes = json?.data?.Classes ?? [];
-          const limitedClasses = Array.isArray(classes) ? classes.slice(0, 20) : [];
+          const limitedClasses = Array.isArray(classes) ? classes.slice(0, 7) : [];
           const limited: UmlApiResponse = {
             ...json,
             data: json.data
