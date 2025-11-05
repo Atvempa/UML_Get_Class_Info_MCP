@@ -87,7 +87,7 @@ const handler = createMcpHandler(
       }
     );
 
-    // Tool: Search Courses (canonical inputs only)
+    // Tool: Search Courses (canonical inputs only; returns max 20 classes)
     server.tool(
       "search_courses",
       [
@@ -98,36 +98,19 @@ const handler = createMcpHandler(
         "  1 = Undergraduate Classes",
         "  2 = Undergraduate Online & Continuing Education Classes",
         "  3 = Graduate Classes (online and on-campus)",
-        "Returns the full UML API payload as JSON.",
+        "Returns the full UML API payload as JSON but truncates data.Classes to at most 20 items.",
       ].join("\n"),
       {
-        term: z
-          .coerce.string()
-          .regex(/^\d+$/, "term must be numeric, e.g., '3530'"),
-        subjects: z
-          .union([
-            z
-              .string()
-              .regex(/^[A-Z]{2,5}$/, "subject must be an uppercase code like 'COMP'"),
-            z.array(
-              z
-                .string()
-                .regex(
-                  /^[A-Z]{2,5}$/,
-                  "each subject must be an uppercase code like 'COMP'"
-                )
-            ),
-          ])
-          .describe(
-            "Official UML subject code(s). Examples: 'COMP', 'MATH' or ['COMP','MATH']"
+        term: z.coerce.string().regex(/^\d+$/, "term must be numeric, e.g., '3530'"),
+        subjects: z.union([
+          z.string().regex(/^[A-Z]{2,5}$/, "subject must be an uppercase code like 'COMP'"),
+          z.array(
+            z.string().regex(/^[A-Z]{2,5}$/, "each subject must be an uppercase code like 'COMP'")
           ),
-        courseOfferingMode: z
-          .union([z.literal(1), z.literal(2), z.literal(3)])
-          .optional()
-          .describe("1=UG, 2=UG OCE, 3=GRAD"),
+        ]),
+        courseOfferingMode: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
       },
       async ({ term, subjects, courseOfferingMode }) => {
-        // Build query params
         const params = new URLSearchParams();
         params.set("term", term);
 
@@ -152,9 +135,22 @@ const handler = createMcpHandler(
           if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
           const json = (await res.json()) as UmlApiResponse;
 
-          // Return the full payload verbatim (pretty-printed)
+          // ---- Enforce max 20 classes in the returned payload ----
+          const classes = json?.data?.Classes ?? [];
+          const limitedClasses = Array.isArray(classes) ? classes.slice(0, 20) : [];
+          const limited: UmlApiResponse = {
+            ...json,
+            data: json.data
+              ? {
+                  ...json.data,
+                  Classes: limitedClasses,
+                  Count: Math.min(json.data.Count ?? classes.length, 20),
+                }
+              : { Classes: limitedClasses, Count: limitedClasses.length },
+          };
+
           return {
-            content: [{ type: "text", text: JSON.stringify(json, null, 2) }],
+            content: [{ type: "text", text: JSON.stringify(limited, null, 2) }],
           };
         } catch (err: any) {
           const message =
@@ -180,7 +176,7 @@ const handler = createMcpHandler(
         },
         search_courses: {
           description:
-            "Search UML courses by term, official subject codes (e.g., 'COMP'), and optional courseOfferingMode (1|2|3). Returns the full UML API payload.",
+            "Search UML courses by term, official subject codes, and optional courseOfferingMode (1|2|3). Returns full payload but truncates to 20 classes.",
         },
       },
     },
