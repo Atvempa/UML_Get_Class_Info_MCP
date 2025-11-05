@@ -8,43 +8,34 @@ interface UmlApiResponse {
   statusCode: number;
   data?: {
     Classes?: any[];
+    Count?: number;
+    SearchFiltersUsed?: any;
   } | null;
 }
 
-// --- Utilities ---
+// --- Constants ---
 const BASE_URL =
   "https://www.uml.edu/student-dashboard/api/ClassSchedule/RealTime/Search";
 
+// --- Helpers ---
 async function fetchCourseDetails(term: string, classNumber: string) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15_000);
-
   try {
     const params = new URLSearchParams({ term, classNumber });
     const url = `${BASE_URL}?${params.toString()}`;
-
     const res = await fetch(url, {
       method: "GET",
-      headers: { "accept": "application/json" },
+      headers: { accept: "application/json" },
       cache: "no-store",
       signal: controller.signal,
     });
-
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status} ${res.statusText}`);
-    }
-
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
     const json = (await res.json()) as UmlApiResponse;
-
-    if (json.isError) {
+    if (json.isError)
       throw new Error(json.message || "UML API responded with an error");
-    }
-
     const cls = json?.data?.Classes?.[0];
-    if (!cls) {
-      return null;
-    }
-    return cls;
+    return cls ?? null;
   } finally {
     clearTimeout(timeout);
   }
@@ -59,7 +50,7 @@ const handler = createMcpHandler(
       "Fetch detailed class information from UML for the given term and class number.",
       {
         term: z
-          .string()
+          .coerce.string()
           .regex(/^\d+$/, "term must be numeric, e.g., '3530'")
           .describe("UML term code, e.g., '3530' for 2026 Spring"),
         classNumber: z
@@ -70,7 +61,6 @@ const handler = createMcpHandler(
       async ({ term, classNumber }) => {
         try {
           const cls = await fetchCourseDetails(term, classNumber);
-
           if (!cls) {
             return {
               content: [
@@ -81,24 +71,102 @@ const handler = createMcpHandler(
               ],
             };
           }
-
-          // Prefer JSON content (if the client supports it); also include a text echo for resilience
           return {
-            content: [
-              { type: "text", text: JSON.stringify(cls) },
-            ],
+            content: [{ type: "text", text: JSON.stringify(cls, null, 2) }],
           };
         } catch (err: any) {
-          const message = err?.name === "AbortError"
-            ? "Request timed out while contacting the UML API"
-            : err?.message || "Unexpected error";
-
+          const message =
+            err?.name === "AbortError"
+              ? "Request timed out while contacting the UML API"
+              : err?.message || "Unexpected error";
           return {
-            content: [
-              { type: "text", text: `Error: ${message}` },
-            ],
+            content: [{ type: "text", text: `Error: ${message}` }],
             isError: true,
           } as any;
+        }
+      }
+    );
+
+    // Tool: Search Courses (canonical inputs only)
+    server.tool(
+      "search_courses",
+      [
+        "Search UML courses by:",
+        "- term: numeric term code (e.g., '3530')",
+        "- subjects: official subject code(s), e.g., 'COMP', 'MATH' (string or string[])",
+        "- courseOfferingMode (optional): 1 | 2 | 3",
+        "  1 = Undergraduate Classes",
+        "  2 = Undergraduate Online & Continuing Education Classes",
+        "  3 = Graduate Classes (online and on-campus)",
+        "Returns the full UML API payload as JSON.",
+      ].join("\n"),
+      {
+        term: z
+          .coerce.string()
+          .regex(/^\d+$/, "term must be numeric, e.g., '3530'"),
+        subjects: z
+          .union([
+            z
+              .string()
+              .regex(/^[A-Z]{2,5}$/, "subject must be an uppercase code like 'COMP'"),
+            z.array(
+              z
+                .string()
+                .regex(
+                  /^[A-Z]{2,5}$/,
+                  "each subject must be an uppercase code like 'COMP'"
+                )
+            ),
+          ])
+          .describe(
+            "Official UML subject code(s). Examples: 'COMP', 'MATH' or ['COMP','MATH']"
+          ),
+        courseOfferingMode: z
+          .union([z.literal(1), z.literal(2), z.literal(3)])
+          .optional()
+          .describe("1=UG, 2=UG OCE, 3=GRAD"),
+      },
+      async ({ term, subjects, courseOfferingMode }) => {
+        // Build query params
+        const params = new URLSearchParams();
+        params.set("term", term);
+
+        const subjectList = Array.isArray(subjects) ? subjects : [subjects];
+        for (const s of subjectList) params.append("subjects", s);
+
+        if (typeof courseOfferingMode !== "undefined") {
+          params.append("courseOfferingModes", String(courseOfferingMode));
+        }
+
+        const url = `${BASE_URL}?${params.toString()}`;
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 20_000);
+        try {
+          const res = await fetch(url, {
+            method: "GET",
+            headers: { accept: "application/json" },
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+          const json = (await res.json()) as UmlApiResponse;
+
+          // Return the full payload verbatim (pretty-printed)
+          return {
+            content: [{ type: "text", text: JSON.stringify(json, null, 2) }],
+          };
+        } catch (err: any) {
+          const message =
+            err?.name === "AbortError"
+              ? "Request timed out while contacting the UML API"
+              : err?.message || "Unexpected error";
+          return {
+            content: [{ type: "text", text: `Error: ${message}` }],
+            isError: true,
+          } as any;
+        } finally {
+          clearTimeout(timeout);
         }
       }
     );
@@ -109,6 +177,10 @@ const handler = createMcpHandler(
         get_course_details: {
           description:
             "Fetch detailed class information from UML for the given term and class number.",
+        },
+        search_courses: {
+          description:
+            "Search UML courses by term, official subject codes (e.g., 'COMP'), and optional courseOfferingMode (1|2|3). Returns the full UML API payload.",
         },
       },
     },
